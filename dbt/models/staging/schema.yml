@@ -1,0 +1,41 @@
+version: 2
+
+sources:
+  - name: raw
+    schema: public
+    description: "Raw transaction feed loaded from the generator or a real dataset."
+    tables:
+      - name: transactions
+        loaded_at_field: ts
+        freshness:
+          warn_after: {count: 24, period: hour}
+          error_after: {count: 72, period: hour}
+        columns:
+          - name: transaction_id
+            tests: [not_null, unique]
+          - name: card_id
+            tests: [not_null]
+          - name: amount
+            tests: [not_null]
+
+models:
+  - name: stg_transactions
+    description: "Cleaned, typed transactions; one row per transaction."
+    columns:
+      - name: transaction_id
+        description: "Primary key."
+        tests: [not_null, unique]
+      - name: card_id
+        tests: [not_null]
+      - name: amount
+        tests: [not_null]
+      - name: channel
+        description: "Card-present vs card-not-present."
+        tests:
+          - accepted_values:
+              values: ['CP', 'CNP']
+      - name: is_fraud
+        description: "Label (0/1)."
+        tests:
+          - accepted_values:
+              values: [0, 1]

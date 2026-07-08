@@ -1,0 +1,19 @@
+services:
+  postgres:
+    image: postgres:16
+    environment:
+      POSTGRES_USER: ${PGUSER:-fraud}
+      POSTGRES_PASSWORD: ${PGPASSWORD:-fraud}
+      POSTGRES_DB: ${PGDATABASE:-fraud}
+    ports:
+      - "5432:5432"
+    volumes:
+      - fraud_pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${PGUSER:-fraud}"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+volumes:
+  fraud_pgdata:

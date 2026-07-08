@@ -1,0 +1,25 @@
+version: 2
+
+models:
+  - name: fct_card_velocity
+    description: "Per-card leakage-safe velocity features."
+    columns:
+      - name: transaction_id
+        tests: [not_null, unique]
+      - name: txn_count_1h
+        description: "Prior transactions on the card in the trailing hour."
+        tests: [not_null]
+
+  - name: fct_transactions
+    description: "Analyst-facing transaction fact with velocity and derived flags."
+    columns:
+      - name: transaction_id
+        tests: [not_null, unique]
+      - name: is_cnp
+        tests:
+          - accepted_values:
+              values: [0, 1]
+      - name: is_night
+        tests:
+          - accepted_values:
+              values: [0, 1]

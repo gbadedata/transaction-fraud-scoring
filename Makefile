@@ -16,6 +16,9 @@ format:           ## auto-fix + format
 demo:             ## run the end-to-end pipeline demo
 	python run_demo.py
 
+figures:          ## regenerate the README figures
+	python scripts/generate_figures.py
+
 dashboard:        ## launch the Streamlit triage app (needs .[dashboard])
 	streamlit run dashboards/streamlit_app.py
 

@@ -104,12 +104,15 @@ The metrics are the operational ones for a base rate near one percent: precision
 
 ```
 src/fraud/         core library (data, features, rules, model, scoring, metrics, monitoring)
-tests/             22 unit tests; the feature tests pin down the no-leakage guarantee
+src/fraud/ieee_*   IEEE-CIS loader + mock, entity resolution and ring-detection features
+tests/             28 unit tests; the feature tests pin down the no-leakage guarantee
+sql/               analyst investigation queries (DuckDB) over the raw IEEE-CIS CSVs
 dbt/               warehouse path: staging and velocity/fact marts with data-quality tests
 dashboards/        Streamlit triage app (budget slider, ranked queue, reason codes)
-scripts/           figure generation for the README
-docs/              model card, data dictionary, architecture decision records, figures
-run_demo.py        the pipeline end to end in one command
+scripts/           figure generation and the investigation-SQL runner
+docs/              model card, data dictionary, IEEE-CIS notes, decision records, figures
+run_demo.py        the synthetic pipeline end to end in one command
+run_ieee_demo.py   the IEEE-CIS pipeline: entity resolution + ring detection
 ```
 
 ## Warehouse layer
@@ -132,19 +135,42 @@ cp dbt/profiles.example.yml ~/.dbt/profiles.yml
 make dbt-build
 ```
 
-## Extending to real data
+## Running on IEEE-CIS (real data)
 
-The engine is real and tested; the data is synthetic. To run it in production:
+The same engine runs on the **IEEE-CIS Fraud Detection** dataset, which is card-not-present e-commerce fraud with no account id and no geolocation. That makes the interesting work *entity resolution* (reconstruct an account from anonymised card attributes) and *ring detection* (find accounts that share a device). It runs with no download on a schema-faithful mock; point the loader at the real CSVs and nothing downstream changes.
 
-1. Replace `generate_transactions` with a loader over a real feed such as IEEE-CIS or `ealtman2019/credit-card-transactions`. It only needs to return the schema in [`data/README.md`](data/README.md); everything downstream is unchanged.
-2. Add entity-level features: per-merchant and per-device risk, and cross-card linkage for ring detection.
-3. Tune the cost model to real unit economics and revisit the operating point with the business.
-4. Enable the model-regression gate in `.github/workflows/ci.yml` so a drop in holdout PR-AUC fails the build, the same way unit tests catch code regressions.
-5. Expand the rule catalogue and run the drift checks on a schedule.
+```bash
+python run_ieee_demo.py                 # entity resolution + ring detection, end to end
+python scripts/run_investigation.py     # analyst SQL over the raw CSVs (DuckDB)
+```
+
+Organised fraud reuses infrastructure, so one device ends up driving many "different" cards. Because the device fingerprint is high-cardinality, a device linked to a dozen cards is not a coincidence. That signal is built as a leakage-safe structural count (distinct cards seen on the device *before* each transaction), and it separates fraud cleanly:
+
+<div align="center">
+  <img src="docs/img/ieee_ring_signal.png" width="620" alt="Fraud rate rising with device-sharing degree">
+  <img src="docs/img/ieee_value_vs_budget.png" width="620" alt="Fraud value recovered per alert budget on IEEE-CIS">
+</div>
+
+The account key is `card1-card2-card3-card5-addr1`, which supports per-account velocity and amount-deviation features, all computed strictly from prior rows. The queue then explains itself in ring terms rather than raw scores:
+
+```
+TransactionID  card1  amount  risk_score            reason_codes   is_fraud
+        34165   5271  895.64        1.00  device shared by 14+ cards        1
+        38610   5110  854.55        1.00  device shared by 14+ cards        1
+        37021   5208  841.57        1.00  device shared by 15+ cards        1
+```
+
+`sql/investigation.sql` holds the queries an analyst runs to find fraud by hand before any model exists: fraud rate by product, devices linking many cards, email domains by fraud rate, high-velocity cards, round-amount effects, and a time-ordered walk through the largest ring.
+
+One honest note. On IEEE-CIS the gradient-boosted model already learns the device-sharing feature, so adding a ring rule to the ranking blend does not move precision or recall. The ring work still earns its place three ways: the counts are among the model's strongest inputs, they provide the reason codes on the queue, and they back a deterministic rule that catches a ring even before the model has evidence. Full mapping and the leakage guards are in [`docs/ieee_cis.md`](docs/ieee_cis.md); download steps are in [`data/README.md`](data/README.md).
+
+## Productionising
+
+Beyond swapping the feed, the remaining steps are operational: tune the cost model to real unit economics and revisit the operating point with the business, enable the model-regression gate in `.github/workflows/ci.yml` so a drop in holdout PR-AUC fails the build the same way unit tests catch code regressions, and run the drift checks (`fraud.monitoring`) on a schedule as the rule catalogue grows.
 
 ## Tech stack
 
-Python (numpy, pandas, scikit-learn, matplotlib), dbt with PostgreSQL, Streamlit, pytest, ruff, and GitHub Actions. The stack is intentionally small and reusable.
+Python (numpy, pandas, scikit-learn, matplotlib), dbt with PostgreSQL, DuckDB for investigation SQL, Streamlit, pytest, ruff, and GitHub Actions. The stack is intentionally small and reusable.
 
 ## Development
 
@@ -152,7 +178,7 @@ Python (numpy, pandas, scikit-learn, matplotlib), dbt with PostgreSQL, Streamlit
 
 ## Data and limitations
 
-All figures here come from synthetic data on a fixed seed and illustrate behaviour rather than real-world performance. The supervised signal only sees labelled fraud, so unknown fraud is invisible to it, which is part of why the anomaly layer exists. False declines harm real customers, so the cost assumptions and the chosen threshold should be reviewed with the business rather than set by the model alone. Raw data files are git-ignored; do not commit real cardholder data.
+All figures here come from synthetic data on a fixed seed and illustrate behaviour rather than real-world performance. The IEEE-CIS figures likewise come from a schema-faithful mock unless the real competition files are present, so those numbers are illustrative too; the loader and features run identically on the real data. The supervised signal only sees labelled fraud, so unknown fraud is invisible to it, which is part of why the anomaly layer exists. False declines harm real customers, so the cost assumptions and the chosen threshold should be reviewed with the business rather than set by the model alone. Raw data files are git-ignored; do not commit real cardholder data.
 
 ## License
 

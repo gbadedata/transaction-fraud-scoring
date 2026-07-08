@@ -1,4 +1,4 @@
-.PHONY: setup test lint format demo dashboard dbt-build clean
+.PHONY: setup test lint format demo ieee-demo investigate figures ieee-figures dashboard dbt-build clean
 
 setup:            ## install package + dev tools
 	pip install -e ".[dev]"
@@ -13,11 +13,20 @@ format:           ## auto-fix + format
 	ruff check --fix .
 	ruff format .
 
-demo:             ## run the end-to-end pipeline demo
+demo:             ## run the synthetic end-to-end pipeline demo
 	python run_demo.py
 
-figures:          ## regenerate the README figures
+ieee-demo:        ## run the IEEE-CIS pipeline (entity resolution + ring detection)
+	python run_ieee_demo.py
+
+investigate:      ## run the analyst investigation SQL over the CSVs (DuckDB)
+	python scripts/run_investigation.py
+
+figures:          ## regenerate the synthetic README figures
 	python scripts/generate_figures.py
+
+ieee-figures:     ## regenerate the IEEE-CIS figures
+	python scripts/generate_ieee_figures.py
 
 dashboard:        ## launch the Streamlit triage app (needs .[dashboard])
 	streamlit run dashboards/streamlit_app.py

@@ -20,12 +20,14 @@ from fraud.features import FEATURE_COLS
 
 
 def anomaly_scores(train_df: pd.DataFrame, score_df: pd.DataFrame,
+                   feature_cols: list[str] | None = None,
                    random_state: int = 0) -> np.ndarray:
     """Unsupervised novelty score in [0, 1] (higher = more anomalous)."""
+    cols = feature_cols if feature_cols is not None else FEATURE_COLS
     iso = IsolationForest(n_estimators=200, contamination="auto",
                           random_state=random_state)
-    iso.fit(train_df[FEATURE_COLS].to_numpy(float))
-    raw = -iso.score_samples(score_df[FEATURE_COLS].to_numpy(float))  # higher = odder
+    iso.fit(train_df[cols].to_numpy(float))
+    raw = -iso.score_samples(score_df[cols].to_numpy(float))  # higher = odder
     lo, hi = raw.min(), raw.max()
     return (raw - lo) / (hi - lo) if hi > lo else np.zeros_like(raw)
 

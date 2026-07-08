@@ -17,11 +17,13 @@ from sklearn.ensemble import HistGradientBoostingClassifier
 from fraud.features import FEATURE_COLS
 
 
-def _matrix(df: pd.DataFrame) -> np.ndarray:
-    return df[FEATURE_COLS].to_numpy(dtype=float)
+def _matrix(df: pd.DataFrame, feature_cols: list[str] | None = None) -> np.ndarray:
+    cols = feature_cols if feature_cols is not None else FEATURE_COLS
+    return df[cols].to_numpy(dtype=float)
 
 
-def train_scorer(train_df: pd.DataFrame, random_state: int = 0) -> CalibratedClassifierCV:
+def train_scorer(train_df: pd.DataFrame, feature_cols: list[str] | None = None,
+                 random_state: int = 0) -> CalibratedClassifierCV:
     """Train a calibrated fraud-probability model on the training slice."""
     base = HistGradientBoostingClassifier(
         max_depth=4,
@@ -34,10 +36,12 @@ def train_scorer(train_df: pd.DataFrame, random_state: int = 0) -> CalibratedCla
     # Internal stratified CV keeps at least some positives in every fold and
     # avoids the version-churn around prefit calibration.
     model = CalibratedClassifierCV(base, method="isotonic", cv=3)
-    model.fit(_matrix(train_df), train_df["is_fraud"].to_numpy(int))
+    model.fit(_matrix(train_df, feature_cols), train_df["is_fraud"].to_numpy(int))
+    # Remember which columns were used so score() stays consistent.
+    model.feature_cols_ = feature_cols if feature_cols is not None else FEATURE_COLS
     return model
 
 
 def score(model: CalibratedClassifierCV, df: pd.DataFrame) -> np.ndarray:
     """Return calibrated fraud probabilities for each transaction."""
-    return model.predict_proba(_matrix(df))[:, 1]
+    return model.predict_proba(_matrix(df, getattr(model, "feature_cols_", None)))[:, 1]

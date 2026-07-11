@@ -146,11 +146,12 @@ python scripts/run_investigation.py     # analyst SQL over the raw CSVs (DuckDB)
 
 The account key is `card1-card2-card3-card5-addr1`, which supports per-account velocity and amount-deviation features, all computed strictly from prior rows. On top of that the model uses IEEE's real firepower: the full `V1..V339` Vesta features, `C1..C14` and `D1..D15` (with de-trended variants), the identity fields, and label-free frequency encodings. That, not the ring rule, is what carries ranking quality on this dataset.
 
-A device sharing signal was a hypothesis, and testing it on real data produced the more useful result. `DeviceInfo` on its own is not a fingerprint: its common values are OS and browser families ("Windows", "iOS Device") shared by huge numbers of legitimate users, so raw "cards per device" tracks popularity, not fraud, and an ungated rule will flag a Windows machine "shared by thousands of cards". The pipeline builds a more specific fingerprint (`DeviceInfo` + browser + screen resolution), keeps the shared-card count next to the fingerprint's overall frequency so the model can tell rare-shared from common, and gates the reason code and the structural rule to specific fingerprints only. The figure below shows the sharing signal after that gating; the raw, ungated version is flat.
+A device sharing signal was a hypothesis, and testing it on real data produced the more useful result. `DeviceInfo` on its own is not a fingerprint: its common values are OS and browser families ("Windows", "iOS Device") shared by huge numbers of legitimate users, so raw "cards per device" tracks popularity, not fraud, and an ungated rule will flag a Windows machine "shared by thousands of cards". The pipeline builds a more specific fingerprint (`DeviceInfo` + browser + screen resolution), keeps the shared-card count next to the fingerprint's overall frequency so the model can tell rare-shared from common, and gates the reason code and the structural rule to specific fingerprints only. After gating, sharing does correlate with fraud (about 9% at two cards, 15% at four to six, against a 3.5% base rate), but it is a modest, non-monotonic signal, not the clean ring detector the mock suggested. That reframing, from headline to tested hypothesis, is the honest result.
+
+The model ranks the queue by expected loss, and the value it recovers scales with the review budget a team can afford:
 
 <div align="center">
-  <img src="docs/img/ieee_ring_signal.png" width="620" alt="Fraud rate by sharing of a specific device fingerprint">
-  <img src="docs/img/ieee_value_vs_budget.png" width="620" alt="Fraud value recovered per alert budget on IEEE-CIS">
+  <img src="docs/img/ieee_value_vs_budget.png" width="680" alt="Fraud value recovered per alert budget on IEEE-CIS">
 </div>
 
 The queue still explains itself in structural terms rather than raw scores, and the device reason can no longer fire on a common device:

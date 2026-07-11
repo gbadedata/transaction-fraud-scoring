@@ -6,7 +6,13 @@ repeat activity, so the expected counts are unambiguous.
 
 import pandas as pd
 
-from fraud.ieee_features import add_ieee_features, build_uid
+from fraud.ieee_features import (
+    add_ieee_features,
+    build_device_fp,
+    build_uid,
+    ring_reason_codes,
+    ring_rule_score,
+)
 
 
 def _frame():
@@ -80,3 +86,40 @@ def test_features_have_no_nans():
     f, cols = add_ieee_features(_frame())
     assert not f[cols].isna().any().any()
     assert "device_prior_cards" in cols and "uid_amount_z" in cols
+
+
+def test_device_fp_uses_browser_and_screen():
+    # Same DeviceInfo family but different browser must yield different fingerprints,
+    # which is how a coarse "Windows" gets split into specific devices.
+    df = pd.DataFrame({
+        "DeviceInfo": ["Windows", "Windows"],
+        "id_31": ["chrome", "safari"],
+        "id_33": ["1920x1080", "1920x1080"],
+    })
+    fp = build_device_fp(df)
+    assert fp.iloc[0] != fp.iloc[1]
+
+
+def test_device_reason_gated_to_specific_fingerprints():
+    # A device shared by many cards only earns a reason code when its fingerprint is
+    # specific (rare). A common/generic fingerprint is excluded even at high counts.
+    df = pd.DataFrame({
+        "device_prior_cards": [8, 8, 0],
+        "device_fp_freq": [0.0001, 0.20, 0.0001],
+        "uid_txn_24h": [0, 0, 0],
+    })
+    reasons = ring_reason_codes(df, device_thr=4, generic_freq=0.002)
+    assert "device shared by 8+ cards" in reasons[0]   # specific + shared -> fires
+    assert reasons[1] == "model/anomaly only"          # common device -> gated out
+    assert reasons[2] == "model/anomaly only"          # no sharing -> nothing
+
+
+def test_ring_rule_score_ignores_common_devices():
+    df = pd.DataFrame({
+        "device_prior_cards": [10, 10],
+        "device_fp_freq": [0.0001, 0.20],
+        "uid_txn_24h": [0, 0],
+    })
+    s = ring_rule_score(df, generic_freq=0.002)
+    assert s[0] > 0     # specific device contributes to the ring score
+    assert s[1] == 0    # common device contributes nothing (no velocity either)

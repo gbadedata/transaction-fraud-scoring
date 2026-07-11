@@ -14,6 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 
 import numpy as np
+import pandas as pd
 
 from fraud import data, ieee_data, ieee_features, metrics, model, scoring
 
@@ -57,7 +58,11 @@ def main() -> None:
     print(f"  cutoffs {cuts[0]:%Y-%m-%d} / {cuts[1]:%Y-%m-%d}\n")
 
     print("Training calibrated scorer on IEEE features...")
-    scorer = model.train_scorer(train, feature_cols=cols)
+    scorer = model.train_scorer(
+        train, feature_cols=cols,
+        max_depth=None, max_leaf_nodes=63, learning_rate=0.05,
+        max_iter=300, min_samples_leaf=50,
+    )
 
     def sig(frame):
         return (model.score(scorer, frame),
@@ -93,19 +98,26 @@ def main() -> None:
           f"| cost ${op.cost:,.0f} vs ${do_nothing:,.0f}\n")
 
     # --- entity / ring detection ---
-    print("Fraud rate by device-sharing degree (cards seen on the device so far):")
-    import pandas as pd
-    buck = pd.cut(test["device_prior_cards"], [-1, 0, 1, 3, 6, 10_000],
-                 labels=["0", "1", "2-3", "4-6", "7+"])
-    tab = test.assign(bucket=buck).groupby("bucket", observed=True)["is_fraud"].agg(
-        fraud_rate="mean", transactions="size")
-    print(tab.round(3).to_string())
+    specific = ieee_features._specific_device(test, ieee_features.GENERIC_DEVICE_FREQ)
+    generic_shared = (~specific) & (test["device_prior_cards"].to_numpy() >= 7)
+    print("Raw device sharing is dominated by generic OS/browser families:")
+    print(f"  common devices shared by 7+ cards: {int(generic_shared.sum()):,} transactions, "
+          f"{test.loc[generic_shared, 'is_fraud'].mean():.1%} fraud (the confound we exclude)\n")
 
-    ring = test[test["device_prior_cards"] >= 4]
+    print("Fraud rate by sharing degree on *specific* device fingerprints only:")
+    sub = test[specific]
+    if len(sub):
+        buck = pd.cut(sub["device_prior_cards"], [-1, 0, 1, 3, 6, 10_000],
+                     labels=["0", "1", "2-3", "4-6", "7+"])
+        tab = sub.assign(bucket=buck).groupby("bucket", observed=True)["is_fraud"].agg(
+            fraud_rate="mean", transactions="size")
+        print(tab.round(3).to_string())
+
+    ring = test[specific & (test["device_prior_cards"] >= 4)]
     ring_val = ring.loc[ring.is_fraud == 1, "amount"].sum()
-    print(f"\nRing-linked transactions (device shared by 4+ cards): {len(ring):,} "
-          f"| {ring['is_fraud'].mean():.0%} fraud | ${ring_val:,.0f} "
-          f"fraud value, caught structurally without the model.\n")
+    print(f"\nSpecific-fingerprint rings (shared by 4+ cards): {len(ring):,} transactions "
+          f"| {ring['is_fraud'].mean():.0%} fraud | ${ring_val:,.0f} fraud value, "
+          f"flagged structurally by the ring rule.\n")
 
     reasons = ieee_features.ring_reason_codes(test)
     queue = scoring.rank_queue(test, t_blend, reasons)

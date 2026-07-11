@@ -137,32 +137,34 @@ make dbt-build
 
 ## Running on IEEE-CIS (real data)
 
-The same engine runs on the **IEEE-CIS Fraud Detection** dataset, which is card-not-present e-commerce fraud with no account id and no geolocation. That makes the interesting work *entity resolution* (reconstruct an account from anonymised card attributes) and *ring detection* (find accounts that share a device). It runs with no download on a schema-faithful mock; point the loader at the real CSVs and nothing downstream changes.
+The same engine runs on the **IEEE-CIS Fraud Detection** dataset, which is card-not-present e-commerce fraud with no account id and no geolocation. That makes the interesting work *entity resolution* (reconstruct an account from anonymised card attributes) and testing whether *shared infrastructure* (a device driving many cards) is a usable signal. It runs with no download on a schema-faithful mock; point the loader at the real CSVs and nothing downstream changes.
 
 ```bash
 python run_ieee_demo.py                 # entity resolution + ring detection, end to end
 python scripts/run_investigation.py     # analyst SQL over the raw CSVs (DuckDB)
 ```
 
-Organised fraud reuses infrastructure, so one device ends up driving many "different" cards. Because the device fingerprint is high-cardinality, a device linked to a dozen cards is not a coincidence. That signal is built as a leakage-safe structural count (distinct cards seen on the device *before* each transaction), and it separates fraud cleanly:
+The account key is `card1-card2-card3-card5-addr1`, which supports per-account velocity and amount-deviation features, all computed strictly from prior rows. On top of that the model uses IEEE's real firepower: the full `V1..V339` Vesta features, `C1..C14` and `D1..D15` (with de-trended variants), the identity fields, and label-free frequency encodings. That, not the ring rule, is what carries ranking quality on this dataset.
+
+A device sharing signal was a hypothesis, and testing it on real data produced the more useful result. `DeviceInfo` on its own is not a fingerprint: its common values are OS and browser families ("Windows", "iOS Device") shared by huge numbers of legitimate users, so raw "cards per device" tracks popularity, not fraud, and an ungated rule will flag a Windows machine "shared by thousands of cards". The pipeline builds a more specific fingerprint (`DeviceInfo` + browser + screen resolution), keeps the shared-card count next to the fingerprint's overall frequency so the model can tell rare-shared from common, and gates the reason code and the structural rule to specific fingerprints only. The figure below shows the sharing signal after that gating; the raw, ungated version is flat.
 
 <div align="center">
-  <img src="docs/img/ieee_ring_signal.png" width="620" alt="Fraud rate rising with device-sharing degree">
+  <img src="docs/img/ieee_ring_signal.png" width="620" alt="Fraud rate by sharing of a specific device fingerprint">
   <img src="docs/img/ieee_value_vs_budget.png" width="620" alt="Fraud value recovered per alert budget on IEEE-CIS">
 </div>
 
-The account key is `card1-card2-card3-card5-addr1`, which supports per-account velocity and amount-deviation features, all computed strictly from prior rows. The queue then explains itself in ring terms rather than raw scores:
+The queue still explains itself in structural terms rather than raw scores, and the device reason can no longer fire on a common device:
 
 ```
 TransactionID  card1  amount  risk_score            reason_codes   is_fraud
         34165   5271  895.64        1.00  device shared by 14+ cards        1
-        38610   5110  854.55        1.00  device shared by 14+ cards        1
-        37021   5208  841.57        1.00  device shared by 15+ cards        1
+        38610   5110  854.55        1.00  device shared by 15+ cards        1
+        37021   5208  841.57        1.00         model/anomaly only        1
 ```
 
 `sql/investigation.sql` holds the queries an analyst runs to find fraud by hand before any model exists: fraud rate by product, devices linking many cards, email domains by fraud rate, high-velocity cards, round-amount effects, and a time-ordered walk through the largest ring.
 
-One honest note. On IEEE-CIS the gradient-boosted model already learns the device-sharing feature, so adding a ring rule to the ranking blend does not move precision or recall. The ring work still earns its place three ways: the counts are among the model's strongest inputs, they provide the reason codes on the queue, and they back a deterministic rule that catches a ring even before the model has evidence. Full mapping and the leakage guards are in [`docs/ieee_cis.md`](docs/ieee_cis.md); download steps are in [`data/README.md`](data/README.md).
+One honest note. On IEEE-CIS the model carries the ranking, and adding the gated ring score to the blend does not reliably beat the model alone. On the real data (590,540 transactions, 3.5% fraud, $3.08M in fraud value) the calibrated single model reaches PR-AUC 0.47, and at the cost-chosen operating point it recovers $380,070 of $609,934 in fraud value. That number is deliberately not higher: the published solutions that score above it lean on full-dataset feature aggregation, which leaks future information into each row, and on large ensembles, neither of which a fraud team can actually deploy. This repo keeps every feature strictly-before and ships one calibrated model, so the number is an honest floor you could run in production rather than a leaderboard artefact. The entity and ring work still earns its place three ways: the counts are model inputs, they provide the reason codes on the queue, and they back a deterministic rule that catches a specific-fingerprint ring even before the model has evidence. Full mapping, the real-data results, the device-fingerprint finding, and the leakage guards are in [`docs/ieee_cis.md`](docs/ieee_cis.md); download steps are in [`data/README.md`](data/README.md).
 
 ## Productionising
 

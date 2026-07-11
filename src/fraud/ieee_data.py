@@ -28,10 +28,6 @@ EMAIL_DOMAINS = np.array([
     "gmail.com", "yahoo.com", "hotmail.com", "anonymous.com", "aol.com",
     "outlook.com", "icloud.com", "comcast.net",
 ])
-DEVICES = np.array([
-    "Windows", "iOS Device", "MacOS", "Samsung SM-G930V", "Trident/7.0",
-    "SM-J700M Build/MMB29K", "rv:11.0", "Moto G (4)",
-])
 PRODUCTCD = np.array(["W", "C", "R", "H", "S"])
 CARD4 = np.array(["visa", "mastercard", "american express", "discover"])
 CARD6 = np.array(["debit", "credit"])
@@ -47,10 +43,16 @@ def _finalise(tx: pd.DataFrame, idf: pd.DataFrame | None) -> pd.DataFrame:
     else:
         df = tx.copy()
 
-    df["ts"] = REF_DATE + pd.to_timedelta(df["TransactionDT"], unit="s")
-    df["amount"] = df["TransactionAmt"].astype(float)
+    # Build derived columns in one shot; assigning them one at a time to a wide
+    # (400+ column) frame triggers pandas fragmentation warnings.
+    derived = {
+        "ts": REF_DATE + pd.to_timedelta(df["TransactionDT"], unit="s"),
+        "amount": df["TransactionAmt"].astype(float),
+    }
     if "isFraud" in df.columns:
-        df["is_fraud"] = df["isFraud"].astype(int)
+        derived["is_fraud"] = df["isFraud"].astype(int)
+    df = pd.concat([df.reset_index(drop=True),
+                    pd.DataFrame(derived).reset_index(drop=True)], axis=1)
     return df.sort_values("ts").reset_index(drop=True)
 
 
@@ -116,8 +118,13 @@ def mock_ieee_frames(n_cards: int = 4000, n_normal: int = 40_000, n_rings: int =
             "R_emaildomain": rng.choice([np.nan, *EMAIL_DOMAINS], n),
             **{f"C{i}": rng.integers(0, 8, n).astype(float) for i in range(1, 15)},
             **{f"D{i}": rng.choice([np.nan, *range(0, 200)], n).astype(float)
-               for i in range(1, 6)},
+               for i in range(1, 16)},
             **{f"M{i}": rng.choice(["T", "F", np.nan], n) for i in range(1, 10)},
+            # A handful of Vesta-style columns; the first few carry weak fraud signal
+            # so the mock model has something to learn beyond the entity features.
+            **{f"V{i}": rng.normal(0.0, 1.0, n)
+               + (np.asarray(fraud, dtype=float) * 0.6 if i <= 6 else 0.0)
+               for i in range(1, 21)},
         })
 
     blocks = []
@@ -129,8 +136,7 @@ def mock_ieee_frames(n_cards: int = 4000, n_normal: int = 40_000, n_rings: int =
     fr_normal = (rng.random(n_normal) < 0.015).astype(int)     # sparse background fraud
     blocks.append(base_block(c1_normal, dt_normal, amt_normal, fr_normal, n=n_normal))
 
-    # --- fraud rings: many distinct cards sharing one device (and often an email) ---
-    ring_devices, ring_ids = [], []
+    # --- fraud rings: distinct cards sharing one specific device (and often an email) ---
     next_card = 1000 + n_cards + 1
     for r in range(n_rings):
         cards = np.arange(next_card, next_card + ring_size)
@@ -143,11 +149,8 @@ def mock_ieee_frames(n_cards: int = 4000, n_normal: int = 40_000, n_rings: int =
         amt = rng.uniform(150.0, 900.0, n)
         share_email = rng.random() < 0.6
         email = np.full(n, f"ring{r}@securemail.cc") if share_email else None
-        blk = base_block(c1, dt, amt, np.ones(n, int),
-                         product=np.full(n, "C"), email=email, n=n)
-        blocks.append(blk)
-        ring_devices.append((blk["TransactionID"].index, f"RingDevice-{r:02d}"))
-        ring_ids.append(blk)
+        blocks.append(base_block(c1, dt, amt, np.ones(n, int),
+                                 product=np.full(n, "C"), email=email, n=n))
 
     # --- single-card velocity bursts ---
     for _ in range(n_bursts):
@@ -167,12 +170,15 @@ def mock_ieee_frames(n_cards: int = 4000, n_normal: int = 40_000, n_rings: int =
     is_fraud = tx["isFraud"].to_numpy() == 1
     keep = is_fraud | (rng.random(len(tx)) < 0.30)
     idx = np.where(keep)[0]
-    base = rng.choice(DEVICES, len(idx))
-    suffix = rng.integers(0, 6000, len(idx))
-    # High-cardinality normal devices (as in the real data): a long tail where most
-    # devices touch only one or two cards. Ring devices are a fixed shared string.
-    device = pd.Series([f"{b} Build/{s}" for b, s in zip(base, suffix, strict=False)],
-                       index=idx)
+
+    # Normal devices are generic OS/browser families, so many cards share the same
+    # low-cardinality fingerprint (as in the real data). This is the confound that
+    # makes raw "cards per device" meaningless on its own.
+    generic = np.array(["Windows", "iOS Device", "MacOS", "Trident/7.0", "rv:11.0"])
+    device = pd.Series(rng.choice(generic, len(idx)), index=idx)
+    id31 = pd.Series(rng.choice(["chrome", "safari", "ie"], len(idx)), index=idx)
+    id33 = pd.Series(rng.choice(["1920x1080", "1366x768"], len(idx)), index=idx)
+
     ring_lookup = {}
     start = 1000 + n_cards + 1
     for r in range(n_rings):
@@ -180,9 +186,13 @@ def mock_ieee_frames(n_cards: int = 4000, n_normal: int = 40_000, n_rings: int =
         start += ring_size
         ring_lookup[r] = cset
     tx_card = tx["card1"].to_numpy()
+    # Ring rows share one *specific*, rare fingerprint (device + browser + screen),
+    # which is the genuine signal the gated ring features are meant to catch.
     for r, cset in ring_lookup.items():
         rows = idx[np.isin(tx_card[idx], list(cset))]
-        device.loc[rows] = f"RingDevice-{r:02d}"
+        device.loc[rows] = f"SM-G9{r:02d}0V Build/RING{r:02d}"
+        id31.loc[rows] = "mobile safari"
+        id33.loc[rows] = f"07{r:02d}x1334"
 
     idf = pd.DataFrame({
         "TransactionID": tx["TransactionID"].to_numpy()[idx],
@@ -190,8 +200,8 @@ def mock_ieee_frames(n_cards: int = 4000, n_normal: int = 40_000, n_rings: int =
         "DeviceInfo": device.to_numpy(),
         "id_01": rng.integers(-100, 0, len(idx)).astype(float),
         "id_02": rng.integers(1, 500000, len(idx)).astype(float),
-        "id_31": rng.choice(["chrome", "safari", "ie", "edge"], len(idx)),
-        "id_33": rng.choice(["1920x1080", "1334x750", "2208x1242"], len(idx)),
+        "id_31": id31.to_numpy(),
+        "id_33": id33.to_numpy(),
     })
 
     tx = tx.drop(columns=[c for c in ["isFraud_x"] if c in tx.columns])

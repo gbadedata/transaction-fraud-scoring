@@ -22,7 +22,6 @@ OUT.mkdir(parents=True, exist_ok=True)
 
 INK, MUTED = "#1f2933", "#9aa5b1"
 MODEL_C, RAND_C, RING_C = "#7b8794", "#cbd2d9", "#c0392b"
-BUDGET = 200
 
 
 def style():
@@ -45,24 +44,30 @@ def load():
 
 
 def value_vs_budget(test, score, y, amount):
-    budgets = np.arange(10, 601, 10)
-    model_curve = [metrics.value_weighted_recall_at_k(y, score, amount, b) for b in budgets]
+    n = len(test)
+    top = max(50, int(n * 0.12))
+    budgets = np.unique(np.clip(np.linspace(max(1, top // 60), top, 60).astype(int), 1, n))
+    model_curve = np.array(
+        [metrics.value_weighted_recall_at_k(y, score, amount, b) for b in budgets])
     rng = np.random.default_rng(0)
     rand = np.zeros(len(budgets))
-    for _ in range(20):
-        r = rng.permutation(len(score))
-        rand += [metrics.value_weighted_recall_at_k(y, r.astype(float), amount, b) for b in budgets]
-    rand /= 20
+    for _ in range(10):
+        r = rng.permutation(len(score)).astype(float)
+        rand += [metrics.value_weighted_recall_at_k(y, r, amount, b) for b in budgets]
+    rand /= 10
+
+    # Annotate where the model recovers half of all fraud value.
+    hit = model_curve >= 0.5
+    half_idx = int(np.argmax(hit)) if hit.any() else len(budgets) - 1
+    b_half, v_half = int(budgets[half_idx]), float(model_curve[half_idx])
 
     fig, ax = plt.subplots(figsize=(7.4, 4.6))
-    ax.plot(budgets, model_curve, color=MODEL_C, lw=2.4, label="model + ring features")
+    ax.plot(budgets, model_curve, color=MODEL_C, lw=2.4, label="model ranking")
     ax.plot(budgets, rand, color=RAND_C, lw=2.0, ls="--", label="random ordering")
-    at_b = metrics.value_weighted_recall_at_k(y, score, amount, BUDGET)
-    ax.scatter([BUDGET], [at_b], color=RING_C, zorder=5, s=45)
-    ax.annotate(f"{at_b:.0%} of fraud value\nin the top {BUDGET} alerts",
-                (BUDGET, at_b), xytext=(BUDGET + 40, at_b - 0.16),
-                color=INK, fontsize=10,
-                arrowprops=dict(arrowstyle="->", color=MUTED))
+    ax.scatter([b_half], [v_half], color=RING_C, zorder=5, s=45)
+    ax.annotate(f"{v_half:.0%} of fraud value\nin the top {b_half:,} reviewed",
+                (b_half, v_half), xytext=(b_half * 1.05, max(0.08, v_half - 0.22)),
+                color=INK, fontsize=10, arrowprops=dict(arrowstyle="->", color=MUTED))
     ax.set_xlabel("alert budget (transactions reviewed)")
     ax.set_ylabel("share of fraud value caught")
     ax.set_title("IEEE-CIS: fraud value recovered per alert budget")
@@ -73,9 +78,11 @@ def value_vs_budget(test, score, y, amount):
 
 
 def ring_signal(test):
-    buckets = pd.cut(test["device_prior_cards"], [-1, 0, 1, 3, 6, 10_000],
+    from fraud.ieee_features import GENERIC_DEVICE_FREQ, _specific_device
+    sub = test[_specific_device(test, GENERIC_DEVICE_FREQ)]
+    buckets = pd.cut(sub["device_prior_cards"], [-1, 0, 1, 3, 6, 10_000],
                      labels=["0", "1", "2-3", "4-6", "7+"])
-    grp = test.assign(b=buckets).groupby("b", observed=True)["is_fraud"].agg(["mean", "size"])
+    grp = sub.assign(b=buckets).groupby("b", observed=True)["is_fraud"].agg(["mean", "size"])
 
     fig, ax = plt.subplots(figsize=(7.4, 4.6))
     colors = [MUTED if i < 3 else RING_C for i in range(len(grp))]
@@ -83,9 +90,9 @@ def ring_signal(test):
     for bar, n in zip(bars, grp["size"], strict=False):
         ax.text(bar.get_x() + bar.get_width() / 2, bar.get_height() + 0.02,
                 f"n={n:,}", ha="center", va="bottom", color=MUTED, fontsize=9)
-    ax.set_xlabel("distinct cards seen on the device before this transaction")
+    ax.set_xlabel("distinct cards on the fingerprint before this transaction")
     ax.set_ylabel("fraud rate")
-    ax.set_title("IEEE-CIS: device sharing is a ring signal")
+    ax.set_title("IEEE-CIS: sharing of a specific device fingerprint")
     ax.set_ylim(0, 1.12)
     fig.savefig(OUT / "ieee_ring_signal.png")
     plt.close(fig)
@@ -96,7 +103,11 @@ def main() -> None:
     df = load()
     df, cols = ieee_features.add_ieee_features(df)
     train, valid, test, _ = data.time_split(df)
-    scorer = model.train_scorer(train, feature_cols=cols)
+    scorer = model.train_scorer(
+        train, feature_cols=cols,
+        max_depth=None, max_leaf_nodes=63, learning_rate=0.05,
+        max_iter=300, min_samples_leaf=50,
+    )
     score = model.score(scorer, test)
     y, amount = test["is_fraud"].to_numpy(), test["amount"].to_numpy()
 

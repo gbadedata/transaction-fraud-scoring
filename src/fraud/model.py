@@ -19,23 +19,36 @@ from fraud.features import FEATURE_COLS
 
 def _matrix(df: pd.DataFrame, feature_cols: list[str] | None = None) -> np.ndarray:
     cols = feature_cols if feature_cols is not None else FEATURE_COLS
-    return df[cols].to_numpy(dtype=float)
+    # float32 keeps memory in check with the wide IEEE feature set (hundreds of Vesta
+    # columns) and is exact enough for a histogram gradient-boosted model.
+    return df[cols].to_numpy(dtype=np.float32)
 
 
 def train_scorer(train_df: pd.DataFrame, feature_cols: list[str] | None = None,
-                 random_state: int = 0) -> CalibratedClassifierCV:
-    """Train a calibrated fraud-probability model on the training slice."""
+                 random_state: int = 0, *, max_depth: int | None = 4,
+                 max_leaf_nodes: int = 31, learning_rate: float = 0.08,
+                 max_iter: int = 250, min_samples_leaf: int = 20,
+                 l2_regularization: float = 1.0,
+                 calib_cv: int = 3) -> CalibratedClassifierCV:
+    """Train a calibrated fraud-probability model on the training slice.
+
+    Defaults are tuned for the synthetic demo. The IEEE-CIS pipeline overrides them
+    with a higher-capacity tree (deeper, more leaves, more iterations) because the
+    hundreds of Vesta features need deeper interactions to pay off.
+    """
     base = HistGradientBoostingClassifier(
-        max_depth=4,
-        learning_rate=0.08,
-        max_iter=250,
-        l2_regularization=1.0,
+        max_depth=max_depth,
+        max_leaf_nodes=max_leaf_nodes,
+        learning_rate=learning_rate,
+        max_iter=max_iter,
+        min_samples_leaf=min_samples_leaf,
+        l2_regularization=l2_regularization,
         early_stopping=False,
         random_state=random_state,
     )
     # Internal stratified CV keeps at least some positives in every fold and
     # avoids the version-churn around prefit calibration.
-    model = CalibratedClassifierCV(base, method="isotonic", cv=3)
+    model = CalibratedClassifierCV(base, method="isotonic", cv=calib_cv)
     model.fit(_matrix(train_df, feature_cols), train_df["is_fraud"].to_numpy(int))
     # Remember which columns were used so score() stays consistent.
     model.feature_cols_ = feature_cols if feature_cols is not None else FEATURE_COLS
